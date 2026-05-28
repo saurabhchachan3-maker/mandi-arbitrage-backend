@@ -1,0 +1,41 @@
+# Environment & secrets
+.env
+.env.*
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data files (add exceptions below if you want to track sample data)
+*.csv
+*.xlsx
+*.parquet
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Claude Code internals
+.claude/
+
+# Local SQLite artefact (project now uses Supabase PostgreSQL)
+*.db
