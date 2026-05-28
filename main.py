@@ -4,7 +4,7 @@ import os
 from datetime import date
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 from openai import OpenAI
 from sqlalchemy import create_engine, text
@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Grain Arbitrage API")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL        = os.getenv("DATABASE_URL")
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 SYSTEM_PROMPT = (
@@ -69,6 +70,19 @@ def insert_trade(action: str, commodity: str, quantity: float, price: float, loc
 def startup_event() -> None:
     init_db()
     logger.info("Database initialised — connected to PostgreSQL via DATABASE_URL")
+
+
+@app.get("/whatsapp")
+async def verify_webhook(request: Request):
+    mode      = request.query_params.get("hub.mode")
+    token     = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    if mode and token:
+        if mode == "subscribe" and token == os.getenv("WHATSAPP_VERIFY_TOKEN"):
+            return Response(content=challenge, media_type="text/plain")
+        raise HTTPException(status_code=403, detail="Forbidden")
+    raise HTTPException(status_code=400, detail="Bad Request")
 
 
 @app.post("/whatsapp", response_class=PlainTextResponse)
