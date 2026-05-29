@@ -4,8 +4,7 @@ import os
 from datetime import date
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, HTTPException, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, HTTPException, Request, Response
 from openai import OpenAI
 from sqlalchemy import create_engine, text
 
@@ -85,46 +84,81 @@ async def verify_webhook(request: Request):
     raise HTTPException(status_code=400, detail="Bad Request")
 
 
-@app.post("/whatsapp", response_class=PlainTextResponse)
-async def whatsapp_webhook(Body: str = Form(...)) -> str:
-    logger.info("Received WhatsApp message: %s", Body)
+@app.post("/whatsapp")
+async def receive_whatsapp(request: Request):
+    payload = await request.json()
+    print("🚨 INCOMING PAYLOAD 🚨:", payload, flush=True)
+    logger.info("Incoming WhatsApp payload: %s", payload)
 
+    # ── Step 1: safely navigate Meta's nested JSON ────────────────────────────
+    # Meta sends status updates (delivery/read receipts) that have no 'messages'
+    # key — we must acknowledge those with 200 OK and do nothing else.
     try:
-        response = client.chat.completions.create(
+        entry   = payload.get("entry", [])
+        changes = entry[0].get("changes", []) if entry else []
+        value   = changes[0].get("value", {}) if changes else {}
+        messages = value.get("messages", [])
+
+        if not messages:
+            logger.info("No messages in payload (status update or other event) — ACK only.")
+            return Response(content="OK", media_type="text/plain", status_code=200)
+
+        message  = messages[0]
+        msg_type = message.get("type", "")
+
+        if msg_type != "text":
+            logger.info("Non-text message received (type=%s) — ACK only.", msg_type)
+            return Response(content="OK", media_type="text/plain", status_code=200)
+
+        body = message.get("text", {}).get("body", "").strip()
+
+        if not body:
+            logger.warning("Empty text body — ACK only.")
+            return Response(content="OK", media_type="text/plain", status_code=200)
+
+    except Exception as exc:
+        logger.error("Payload navigation failed: %s", exc)
+        return Response(content="OK", media_type="text/plain", status_code=200)
+
+    logger.info("Extracted message body: %s", body)
+
+    # ── Step 2: send to OpenAI for trade extraction ───────────────────────────
+    try:
+        ai_response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": Body},
+                {"role": "user",   "content": body},
             ],
             temperature=0,
         )
-        raw = response.choices[0].message.content.strip()
+        raw = ai_response.choices[0].message.content.strip()
         logger.info("OpenAI response: %s", raw)
     except Exception as exc:
         logger.error("OpenAI API call failed: %s", exc)
-        return "Error: could not reach OpenAI."
+        return Response(content="OK", media_type="text/plain", status_code=200)
 
+    # ── Step 3: parse extracted JSON ──────────────────────────────────────────
     try:
-        data = json.loads(raw)
-        action = str(data["action"]).lower()
+        data      = json.loads(raw)
+        action    = str(data.get("action", "")).lower()
         if action not in ("buy", "sell"):
             raise ValueError(f"Invalid action value: {action!r}")
-        commodity = str(data["commodity"])
-        quantity = float(data["quantity_quintals"])
-        price = float(data["price_per_quintal"])
-        location = str(data["location"])
-    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+        commodity = str(data.get("commodity", ""))
+        quantity  = float(data.get("quantity_quintals", 0))
+        price     = float(data.get("price_per_quintal", 0))
+        location  = str(data.get("location", ""))
+    except Exception as exc:
         logger.error("Failed to parse trade from OpenAI response %r: %s", raw, exc)
-        return "Error: could not extract trade details from message."
+        return Response(content="OK", media_type="text/plain", status_code=200)
 
+    # ── Step 4: persist to database ───────────────────────────────────────────
     try:
         trade_id = insert_trade(action, commodity, quantity, price, location)
-        logger.info("Inserted trade id=%s", trade_id)
+        logger.info("Trade saved — id=%s | %s %s qtl %s @ ₹%s (%s)",
+                    trade_id, action.upper(), quantity, commodity, price, location)
     except Exception as exc:
         logger.error("Database insert failed: %s", exc)
-        return "Error: could not save trade to database."
+        return Response(content="OK", media_type="text/plain", status_code=200)
 
-    return (
-        f"Trade recorded (id={trade_id}): {action.upper()} {quantity} qtl of {commodity} "
-        f"@ ₹{price}/qtl in {location}."
-    )
+    return Response(content="OK", media_type="text/plain", status_code=200)
