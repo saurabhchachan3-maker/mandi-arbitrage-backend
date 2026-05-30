@@ -92,7 +92,7 @@ def init_db() -> None:
                 status            TEXT
             )
         """))
-        # Migration guards — safe on existing databases with old schema
+        # Migration guards — add new columns if table already exists with old schema
         for col, col_type in [
             ("sender_number",      "TEXT"),
             ("workflow_type",      "TEXT"),
@@ -106,6 +106,17 @@ def init_db() -> None:
             conn.execute(text(
                 f"ALTER TABLE physical_trades ADD COLUMN IF NOT EXISTS {col} {col_type}"
             ))
+
+        # Drop NOT NULL from legacy columns created by the old schema.
+        # The new insert_trade() never sends action/price/location, so any
+        # NOT NULL constraint on them causes a constraint-violation error.
+        for legacy_col in ["action", "commodity", "quantity", "price", "location"]:
+            try:
+                conn.execute(text(
+                    f"ALTER TABLE physical_trades ALTER COLUMN {legacy_col} DROP NOT NULL"
+                ))
+            except Exception:
+                pass   # column doesn't exist on a fresh install — safe to ignore
 
 
 def insert_trade(data: dict) -> int:
