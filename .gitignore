@@ -37,5 +37,8 @@ Thumbs.db
 # Claude Code internals
 .claude/
 
+# Streamlit secrets (contains live credentials — never commit)
+.streamlit/secrets.toml
+
 # Local SQLite artefact (project now uses Supabase PostgreSQL)
 *.db
