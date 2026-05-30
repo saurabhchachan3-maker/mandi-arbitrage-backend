@@ -40,5 +40,10 @@ Thumbs.db
 # Streamlit secrets (contains live credentials — never commit)
 .streamlit/secrets.toml
 
+# Local credential documents — never commit
+*.docx
+*.doc
+Meta Permanent Access Token/
+
 # Local SQLite artefact (project now uses Supabase PostgreSQL)
 *.db
