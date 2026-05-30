@@ -239,10 +239,13 @@ with st.sidebar:
 # DATABASE HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_all_trades() -> pd.DataFrame:
+def load_all_trades() -> tuple[pd.DataFrame, str | None]:
+    """Return (DataFrame, error_message). error_message is None on success."""
+    if _engine is None:
+        return pd.DataFrame(), "DATABASE_URL not configured — check secrets.toml"
     try:
         with _engine.connect() as conn:
-            return pd.read_sql_query(
+            df = pd.read_sql_query(
                 """SELECT id, date, sender_number, workflow_type, commodity,
                           quantity, rate, warehouse_location, seller_name,
                           buyer_name, delivery_date, status
@@ -250,8 +253,9 @@ def load_all_trades() -> pd.DataFrame:
                    ORDER  BY id DESC""",
                 conn,
             )
-    except Exception:
-        return pd.DataFrame()
+        return df, None
+    except Exception as exc:
+        return pd.DataFrame(), str(exc)
 
 
 def insert_trade_manual(data: dict) -> int:
@@ -330,7 +334,12 @@ def _section_header(emoji: str, title: str, count: int) -> None:
     )
 
 
-def render_inventory(df: pd.DataFrame) -> None:
+def render_inventory(df: pd.DataFrame, db_error: str | None = None) -> None:
+    # Show DB error prominently so it's never silently swallowed
+    if db_error:
+        st.error(f"⚠️ **Database connection error** — could not load trades.\n\n`{db_error}`")
+        return
+
     if df.empty:
         st.info(tx("no_trades"))
         return
@@ -465,6 +474,18 @@ def render_inventory(df: pd.DataFrame) -> None:
             dt[cols_dt].rename(columns=rename_dt),
             hide_index=True, use_container_width=True,
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # CATCH-ALL — rows where workflow_type is NULL / unclassified
+    # ─────────────────────────────────────────────────────────────────────────
+    unclassified = df[~df["workflow_type"].isin(["Warehousing", "Processing", "Direct Trade"])].copy()
+    if not unclassified.empty:
+        st.markdown("---")
+        _section_header("📋", "Unclassified / Legacy Entries" if LNG == "en"
+                        else "अवर्गीकृत प्रविष्टियां", len(unclassified))
+        st.caption("These rows have no workflow_type (old schema entries)." if LNG == "en"
+                   else "इन प्रविष्टियों में workflow_type नहीं है।")
+        st.dataframe(unclassified, hide_index=True, use_container_width=True)
 
     st.markdown("---")
 
@@ -777,17 +798,23 @@ def render_ai_predictor(trade_count: int) -> None:
 # PAGE LAYOUT
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.title(tx("app_title"))
-st.caption(tx("app_caption"))
+hdr_col, refresh_col = st.columns([6, 1])
+with hdr_col:
+    st.title(tx("app_title"))
+    st.caption(tx("app_caption"))
+with refresh_col:
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("🔄 Refresh", use_container_width=True):
+        st.rerun()
 
-_df = load_all_trades()
+_df, _db_error = load_all_trades()
 
 tab_inv, tab_intel, tab_entry, tab_ai = st.tabs([
     tx("tab_inventory"), tx("tab_intel"), tx("tab_entry"), tx("tab_ai"),
 ])
 
 with tab_inv:
-    render_inventory(_df)
+    render_inventory(_df, _db_error)
 
 with tab_intel:
     render_market_intel()
