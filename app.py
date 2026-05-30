@@ -5,135 +5,94 @@ from datetime import date as dt_date
 import feedparser
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-load_dotenv()
-_engine = create_engine(os.getenv("DATABASE_URL"), pool_pre_ping=True)
+# ── Page config — MUST be the very first Streamlit call ──────────────────────
+st.set_page_config(
+    page_title="Grain Arbitrage Terminal",
+    page_icon="🌾",
+    layout="wide",
+)
 
-# ── Page config (must be the very first Streamlit call) ───────────────────────
-st.set_page_config(page_title="Grain Arbitrage Terminal", layout="wide")
+# ── DB engine ─────────────────────────────────────────────────────────────────
+try:
+    _DB_URL = st.secrets["DATABASE_URL"]
+except Exception:
+    _DB_URL = os.getenv("DATABASE_URL", "")
+_engine = create_engine(_DB_URL, pool_pre_ping=True) if _DB_URL else None
 
-# ── Language toggle (sidebar) ─────────────────────────────────────────────────
-st.sidebar.markdown("## ⚙️ Settings")
-_lang_choice = st.sidebar.radio("Language / भाषा", ["English", "Hindi"], horizontal=True)
-LNG: str = "hi" if _lang_choice == "Hindi" else "en"
-st.sidebar.markdown("---")
-st.sidebar.caption("Grain Arbitrage Terminal v1.0\nPowered by OpenAI + NCDEX data")
+# ── Passcode (read once at module level) ──────────────────────────────────────
+try:
+    _PASSCODE = st.secrets.get("DASHBOARD_PASSCODE", "")
+except Exception:
+    _PASSCODE = os.getenv("DASHBOARD_PASSCODE", "")
 
-# ── Translation dictionary ─────────────────────────────────────────────────────
+# ── Language — backed by session state so it survives tab switches ────────────
+if "lang" not in st.session_state:
+    st.session_state["lang"] = "en"
+LNG: str = st.session_state["lang"]
+
+# ── Translation table ─────────────────────────────────────────────────────────
 _T: dict[str, dict[str, str]] = {
-    # App chrome
-    "app_title":       {"en": "Grain Arbitrage Terminal",
-                        "hi": "अनाज आर्बिट्राज टर्मिनल"},
-    "app_caption":     {"en": "Live intelligence dashboard for physical grain trading across Indian mandis.",
-                        "hi": "भारतीय मंडियों में भौतिक अनाज व्यापार के लिए लाइव इंटेलिजेंस डैशबोर्ड।"},
-    # Commodity tab labels
-    "tab_chana":       {"en": "Chana (Gram)",              "hi": "चना (ग्राम)"},
-    "tab_moong":       {"en": "Moong Dal",                 "hi": "मूंग दाल"},
-    "tab_groundnut":   {"en": "Groundnut",                 "hi": "मूंगफली"},
-    "tab_ai":          {"en": "🤖 AI Price Predictor",     "hi": "🤖 AI मूल्य पूर्वानुमान"},
-    # Weather
-    "weather_hdr":     {"en": "Regional Weather",          "hi": "क्षेत्रीय मौसम"},
-    # Circulars
-    "dgft_hdr":        {"en": "DGFT / Govt. Circulars",    "hi": "DGFT / सरकारी परिपत्र"},
-    "issued_lbl":      {"en": "Issued",                    "hi": "जारी"},
-    # News
-    "news_hdr":        {"en": "Live News Feed",            "hi": "ताज़ा समाचार मुख्य समाचार"},
-    "news_note":       {"en": "",
-                        "hi": "📰 *अंग्रेज़ी हेडलाइंस (Live English Headlines via Google News)*"},
-    "news_empty":      {"en": "No news articles found.",   "hi": "कोई समाचार नहीं मिला।"},
-    "news_loading":    {"en": "Fetching news…",            "hi": "समाचार लोड हो रहे हैं…"},
-    # Inventory section
-    "inventory_hdr":   {"en": "### Live Godown Inventory & Trades",
-                        "hi": "### लाइव गोदाम इन्वेंटरी और व्यापार"},
-    "no_trades":       {"en": "No trades recorded yet.",
-                        "hi": "अभी तक कोई व्यापार दर्ज नहीं।"},
-    "net_stock_hdr":   {"en": "🏭 Current Net Warehouse Stock",
-                        "hi": "🏭 गोदाम में कुल स्टॉक स्थिति"},
-    "trade_log_hdr":   {"en": "Trade Log",                 "hi": "व्यापार लॉग"},
-    "delete_hdr":      {"en": "Correct a Mistaken Entry",  "hi": "गलत प्रविष्टि सुधारें"},
-    "delete_sel":      {"en": "Select Trade ID to Delete", "hi": "हटाने के लिए ट्रेड ID चुनें"},
-    "delete_btn":      {"en": "🗑️ Delete Entry",           "hi": "🗑️ प्रविष्टि हटाएं"},
-    # Table column names
-    "col_commodity":   {"en": "Commodity",                        "hi": "अनाज"},
-    "col_net_wt":      {"en": "Net Weight Available (Quintals)",   "hi": "उपलब्ध नेट वजन (क्विंटल)"},
-    "col_avg_price":   {"en": "Avg Purchase Price (₹/Quintal)",    "hi": "औसत खरीद मूल्य (₹/क्विंटल)"},
-    "col_bought":      {"en": "Total Bought (qtl)",                "hi": "कुल खरीद (क्विंटल)"},
-    "col_sold":        {"en": "Total Sold (qtl)",                  "hi": "कुल बिक्री (क्विंटल)"},
-    "col_status":      {"en": "Status",                            "hi": "स्थिति"},
-    # Stock status badges
-    "in_stock":        {"en": "✅ In Stock",   "hi": "✅ स्टॉक में"},
-    "zero_stock":      {"en": "⚪ Zero Stock", "hi": "⚪ शून्य स्टॉक"},
-    "oversold":        {"en": "❌ Oversold",   "hi": "❌ अधिक बिक्री"},
-    # AI predictor chrome
-    "ai_hdr":          {"en": "## 🤖 AI Arbitrage Predictor",
-                        "hi": "## 🤖 AI आर्बिट्राज पूर्वानुमान"},
-    "ai_caption":      {"en": ("Macro-rule engine evaluating live government policy signals and regional "
-                               "weather patterns to generate NCDEX–mandi spread estimates and directional "
-                               "trade recommendations. Transitions automatically to ML mode once 30 trades "
-                               "are recorded in your local database."),
-                        "hi": ("मैक्रो-नियम इंजन जो सरकारी नीति संकेतों और क्षेत्रीय मौसम पैटर्न का मूल्यांकन "
-                               "कर NCDEX–मंडी स्प्रेड अनुमान और व्यापार सुझाव देता है। 30 ट्रेड दर्ज होने पर "
-                               "स्वचालित रूप से ML मोड में बदल जाएगा।")},
-    "signals_hdr":     {"en": "Active Market Signals",            "hi": "सक्रिय बाज़ार संकेत"},
-    "no_signals":      {"en": "No strong macro signals detected.", "hi": "कोई मजबूत संकेत नहीं मिला।"},
-    # AI metric labels
-    "lbl_ncdex":       {"en": "NCDEX Reference (₹/qtl)",          "hi": "NCDEX संदर्भ (₹/क्विंटल)"},
-    "lbl_mandi":       {"en": "Predicted Mandi Price (₹/qtl)",     "hi": "अनुमानित मंडी मूल्य (₹/क्विंटल)"},
-    "lbl_spread":      {"en": "Predicted NCDEX–Mandi Spread",      "hi": "अनुमानित NCDEX–मंडी अंतर"},
-    "lbl_bias":        {"en": "Predicted Market Bias",             "hi": "अनुमानित बाज़ार पूर्वाग्रह"},
-    "lbl_strength":    {"en": "Arbitrage Signal Strength",         "hi": "आर्बिट्राज संकेत शक्ति"},
-    # Trend labels (used by AI tab metric cards)
-    "bullish":         {"en": "📈 BULLISH",  "hi": "📈 तेजी"},
-    "bearish":         {"en": "📉 BEARISH",  "hi": "📉 मंदी"},
-    "neutral":         {"en": "➡️ STABLE",   "hi": "➡️ स्थिर"},
-    # Trade advice (full sentence per trend)
-    "advice_bullish":  {"en": ("Physical mandi prices expected to firm. Consider accumulating inventory "
-                               "at current spot levels before NCDEX corrects upward."),
-                        "hi": ("भौतिक मंडी मूल्य मजबूत होने की उम्मीद है। NCDEX के ऊपर सुधार से पहले "
-                               "मौजूदा स्पॉट स्तरों पर इन्वेंटरी जमा करने पर विचार करें।")},
-    "advice_bearish":  {"en": ("Downward price pressure likely. Prioritise liquidating surplus physical "
-                               "stock above cost-price before the NCDEX–mandi spread compresses further."),
-                        "hi": ("कीमतों में गिरावट की संभावना है। NCDEX–मंडी अंतर संकुचित होने से पहले "
-                               "लागत मूल्य से ऊपर अधिशेष भौतिक स्टॉक बेचने को प्राथमिकता दें।")},
-    "advice_neutral":  {"en": ("Mixed signals. Hold existing positions and monitor NAFED release progress "
-                               "or fresh weather developments before committing capital."),
-                        "hi": ("मिश्रित संकेत। पूंजी लगाने से पहले NAFED जारी होने की प्रगति या "
-                               "नए मौसम विकास की निगरानी करते रहें।")},
-    # Engine mode footer
-    "engine_ml":       {"en": "🧠 **Engine Mode: High-Fidelity ML** — Local spread optimisation active.",
-                        "hi": "🧠 **इंजन मोड: हाई-फिडेलिटी ML** — स्थानीय स्प्रेड ऑप्टिमाइज़ेशन सक्रिय।"},
-    "engine_macro":    {"en": "📊 **Engine Mode: Macro-Rule Baseline** (Weather + NAFED Notifications)",
-                        "hi": "📊 **इंजन मोड: मैक्रो-नियम बेसलाइन** (मौसम + NAFED अधिसूचनाएं)"},
-    "engine_body":     {"en": ("The system will automatically transition to **High-Fidelity Machine Learning** "
-                               "once the local database reaches **{n} historical entries**, unlocking local "
-                               "spread arbitrage optimisation using your own mandi data, cost-basis, and "
-                               "location-specific price patterns."),
-                        "hi": ("जब लोकल डेटाबेस में **{n} ऐतिहासिक प्रविष्टियां** हो जाएंगी, तब सिस्टम "
-                               "स्वचालित रूप से **हाई-फिडेलिटी मशीन लर्निंग** में बदल जाएगा और आपके मंडी "
-                               "डेटा, लागत आधार और स्थान-विशिष्ट मूल्य पैटर्न का उपयोग करेगा।")},
+    "app_title":      {"en": "Grain Arbitrage Terminal",       "hi": "अनाज आर्बिट्राज टर्मिनल"},
+    "app_caption":    {"en": "Live intelligence dashboard for physical grain trading across Indian mandis.",
+                       "hi": "भारतीय मंडियों में भौतिक अनाज व्यापार के लिए लाइव इंटेलिजेंस डैशबोर्ड।"},
+    "tab_inventory":  {"en": "📊 Live Inventory",              "hi": "📊 लाइव इन्वेंटरी"},
+    "tab_intel":      {"en": "📰 Market Intelligence",         "hi": "📰 बाज़ार इंटेलिजेंस"},
+    "tab_entry":      {"en": "✏️ Manual Entry",                "hi": "✏️ मैन्युअल प्रविष्टि"},
+    "tab_ai":         {"en": "🤖 AI Price Predictor",          "hi": "🤖 AI मूल्य पूर्वानुमान"},
+    "weather_hdr":    {"en": "Regional Weather",               "hi": "क्षेत्रीय मौसम"},
+    "dgft_hdr":       {"en": "DGFT / Govt. Circulars",         "hi": "DGFT / सरकारी परिपत्र"},
+    "issued_lbl":     {"en": "Issued",                         "hi": "जारी"},
+    "news_hdr":       {"en": "Live News Feed",                 "hi": "ताज़ा समाचार"},
+    "news_note":      {"en": "",
+                       "hi": "📰 *अंग्रेज़ी हेडलाइंस (Live English Headlines via Google News)*"},
+    "news_empty":     {"en": "No articles found.",             "hi": "कोई समाचार नहीं मिला।"},
+    "news_loading":   {"en": "Fetching news…",                 "hi": "समाचार लोड हो रहे हैं…"},
+    "no_trades":      {"en": "No trades recorded yet.",        "hi": "अभी तक कोई व्यापार दर्ज नहीं।"},
+    "delete_sel":     {"en": "Select Trade ID to Delete",      "hi": "हटाने के लिए ट्रेड ID चुनें"},
+    "delete_btn":     {"en": "🗑️ Delete Entry",                "hi": "🗑️ प्रविष्टि हटाएं"},
+    "ai_hdr":         {"en": "## 🤖 AI Arbitrage Predictor",   "hi": "## 🤖 AI आर्बिट्राज पूर्वानुमान"},
+    "ai_caption":     {"en": ("Macro-rule engine evaluating live government policy and regional weather "
+                              "to generate NCDEX–mandi spread estimates. Transitions to ML mode at 30 trades."),
+                       "hi": ("मैक्रो-नियम इंजन जो नीति संकेतों और मौसम पैटर्न का मूल्यांकन कर "
+                              "NCDEX–मंडी स्प्रेड अनुमान देता है। 30 ट्रेड पर ML मोड में बदलेगा।")},
+    "signals_hdr":    {"en": "Active Market Signals",          "hi": "सक्रिय बाज़ार संकेत"},
+    "no_signals":     {"en": "No strong macro signals detected.", "hi": "कोई मजबूत संकेत नहीं।"},
+    "lbl_ncdex":      {"en": "NCDEX Reference (₹/qtl)",        "hi": "NCDEX संदर्भ (₹/क्विंटल)"},
+    "lbl_mandi":      {"en": "Predicted Mandi Price (₹/qtl)",  "hi": "अनुमानित मंडी मूल्य (₹/क्विंटल)"},
+    "lbl_spread":     {"en": "Predicted NCDEX–Mandi Spread",   "hi": "अनुमानित NCDEX–मंडी अंतर"},
+    "lbl_bias":       {"en": "Predicted Market Bias",          "hi": "अनुमानित बाज़ार पूर्वाग्रह"},
+    "lbl_strength":   {"en": "Arbitrage Signal Strength",      "hi": "आर्बिट्राज संकेत शक्ति"},
+    "bullish":        {"en": "📈 BULLISH",                     "hi": "📈 तेजी"},
+    "bearish":        {"en": "📉 BEARISH",                     "hi": "📉 मंदी"},
+    "neutral":        {"en": "➡️ STABLE",                     "hi": "➡️ स्थिर"},
+    "advice_bullish": {"en": "Physical mandi prices expected to firm. Consider accumulating at current spot levels.",
+                       "hi": "मंडी मूल्य मजबूत होने की उम्मीद है। मौजूदा स्तरों पर इन्वेंटरी जमा करें।"},
+    "advice_bearish": {"en": "Downward pressure likely. Prioritise liquidating surplus above cost-price.",
+                       "hi": "कीमतों में गिरावट संभव। लागत मूल्य से ऊपर अधिशेष स्टॉक बेचें।"},
+    "advice_neutral": {"en": "Mixed signals. Hold positions and monitor NAFED releases and weather updates.",
+                       "hi": "मिश्रित संकेत। NAFED और मौसम अपडेट की निगरानी करें।"},
+    "engine_ml":      {"en": "🧠 **Engine Mode: High-Fidelity ML** — Local spread optimisation active.",
+                       "hi": "🧠 **इंजन मोड: हाई-फिडेलिटी ML** — स्थानीय स्प्रेड ऑप्टिमाइज़ेशन सक्रिय।"},
+    "engine_macro":   {"en": "📊 **Engine Mode: Macro-Rule Baseline** (Weather + NAFED Notifications)",
+                       "hi": "📊 **इंजन मोड: मैक्रो-नियम बेसलाइन** (मौसम + NAFED अधिसूचनाएं)"},
+    "engine_body":    {"en": ("The system transitions to **High-Fidelity ML** once the database reaches "
+                              "**{n} entries**, unlocking location-specific spread arbitrage optimisation."),
+                       "hi": ("**{n} प्रविष्टियां** होने पर सिस्टम **ML** मोड में बदल जाएगा।")},
 }
 
 
 def tx(key: str, **fmt) -> str:
-    """Return the translated string for the current language, with optional .format() substitutions."""
     s = _T.get(key, {}).get(LNG) or _T.get(key, {}).get("en") or key
     return s.format(**fmt) if fmt else s
 
 
-# ── Static data ────────────────────────────────────────────────────────────────
+# ── Static market intelligence data ──────────────────────────────────────────
 COMMODITIES: dict[str, str] = {
     "Chana (Gram)": "chana gram grain prices india",
     "Moong Dal":    "moong dal grain prices india",
     "Groundnut":    "groundnut peanut grain prices india",
-}
-
-# Maps commodity English key → translated tab label key
-COMMODITY_TAB_KEY: dict[str, str] = {
-    "Chana (Gram)": "tab_chana",
-    "Moong Dal":    "tab_moong",
-    "Groundnut":    "tab_groundnut",
 }
 
 WEATHER_DATA: dict[str, list[tuple[str, str, str]]] = {
@@ -154,53 +113,42 @@ WEATHER_DATA: dict[str, list[tuple[str, str, str]]] = {
     ],
 }
 
-# Each alert: (title_en, body, issue_date)
 DGFT_ALERTS: dict[str, list[tuple[str, str, dt_date]]] = {
     "Chana (Gram)": [
         ("Stock Limit Advisory",
-         "States advised to strictly enforce trader stock limits under the Essential Commodities Act. "
-         "District collectors to conduct surprise inspections at mandis and cold-storage facilities.",
+         "States advised to strictly enforce trader stock limits under the Essential Commodities Act.",
          dt_date(2026, 5, 26)),
         ("Import Duty Update",
-         "Chana import duty retained at 66% — no revision in the latest DGFT review. "
-         "Effective for all consignments cleared after 01-May-2026.",
+         "Chana import duty retained at 66% — effective for all consignments cleared after 01-May-2026.",
          dt_date(2026, 5, 22)),
         ("MSP Notification",
-         "Govt. MSP for Chana fixed at ₹5,440/qtl for Rabi 2025-26 season. "
-         "Procurement through NAFED and state agencies to commence from 01-Jun-2026.",
+         "Govt. MSP for Chana fixed at ₹5,440/qtl for Rabi 2025-26 season.",
          dt_date(2026, 5, 15)),
     ],
     "Moong Dal": [
         ("Buffer Stock Release",
-         "NAFED to release 50,000 MT Moong from central buffer stocks across Delhi, Mumbai, and Chennai "
-         "APMCs to cool wholesale prices ahead of the kharif arrival.",
+         "NAFED to release 50,000 MT Moong from central buffer stocks across Delhi, Mumbai, and Chennai APMCs.",
          dt_date(2026, 5, 25)),
         ("Export Incentive",
-         "DGFT extends MEIS benefit of 3% for Moong exports to ASEAN nations for a further 6 months. "
-         "Exporters must register their intent on DGFT portal before 30-Jun-2026.",
+         "DGFT extends MEIS benefit of 3% for Moong exports to ASEAN nations for a further 6 months.",
          dt_date(2026, 5, 20)),
         ("Quality Standard Alert",
-         "FSSAI has revised moisture-content ceiling for packaged Moong Dal from 14% to 12%. "
-         "Non-compliant stock to be quarantined pending re-testing. Applicable to all licensed FBOs.",
+         "FSSAI revised moisture-content ceiling for packaged Moong Dal from 14% to 12%.",
          dt_date(2026, 5, 12)),
     ],
     "Groundnut": [
         ("SEZ Notification",
-         "Kandla SEZ announces a 90-day zero-duty export window for groundnut oil and meal. "
-         "Window opens 01-Jun-2026. Applications via SEZ online portal only.",
+         "Kandla SEZ announces a 90-day zero-duty export window for groundnut oil and meal.",
          dt_date(2026, 5, 23)),
         ("Aflatoxin Advisory",
-         "FSSAI advisory: all groundnut export consignments to EU/US must carry an aflatoxin test "
-         "certificate from an NABL-accredited lab. Tolerance limit B1+B2+G1+G2 ≤ 10 ppb.",
+         "FSSAI advisory: all groundnut export consignments to EU/US must carry an aflatoxin test certificate.",
          dt_date(2026, 5, 18)),
         ("MSP Update",
-         "CACP recommends Kharif 2026 Groundnut MSP at ₹6,783/qtl — a 4.2% hike over last season. "
-         "Cabinet approval expected before 15-Jun-2026.",
+         "CACP recommends Kharif 2026 Groundnut MSP at ₹6,783/qtl — a 4.2% hike over last season.",
          dt_date(2026, 5, 8)),
     ],
 }
 
-# Hindi translations for DGFT alert titles
 DGFT_TITLE_HI: dict[str, str] = {
     "Stock Limit Advisory":   "स्टॉक सीमा सलाह",
     "Import Duty Update":     "आयात शुल्क अपडेट",
@@ -213,107 +161,116 @@ DGFT_TITLE_HI: dict[str, str] = {
     "MSP Update":             "एमएसपी अपडेट",
 }
 
-# NCDEX reference futures prices (₹/qtl) and neutral mandi discounts
 BASE_NCDEX: dict[str, float] = {
-    "Chana (Gram)": 5_580.0,
-    "Moong Dal":    8_750.0,
-    "Groundnut":    6_900.0,
+    "Chana (Gram)": 5_580.0, "Moong Dal": 8_750.0, "Groundnut": 6_900.0,
 }
 BASE_SPREAD: dict[str, float] = {
-    "Chana (Gram)": 180.0,
-    "Moong Dal":    280.0,
-    "Groundnut":    150.0,
+    "Chana (Gram)": 180.0, "Moong Dal": 280.0, "Groundnut": 150.0,
 }
 
 
-# ── Helper: relative date label ───────────────────────────────────────────────
-def _relative_label(issue_date: dt_date) -> str:
-    delta = (dt_date.today() - issue_date).days
-    if LNG == "hi":
-        if delta == 0:   return "आज"
-        if delta == 1:   return "कल"
-        if delta < 30:   return f"{delta} दिन पहले"
-        return f"{delta // 30} महीने पहले"
-    else:
-        if delta == 0:   return "today"
-        if delta == 1:   return "yesterday"
-        if delta < 30:   return f"{delta} days ago"
-        months = delta // 30
-        return f"{months} month{'s' if months > 1 else ''} ago"
+# ─────────────────────────────────────────────────────────────────────────────
+# SECURITY GATE
+# ─────────────────────────────────────────────────────────────────────────────
 
+def render_login() -> None:
+    """Render the centered passcode gate. Hides sidebar and all app content."""
+    st.markdown("""
+        <style>
+        [data-testid="stSidebar"]       { display: none !important; }
+        [data-testid="collapsedControl"] { display: none !important; }
+        </style>
+    """, unsafe_allow_html=True)
 
-# ── News fetcher ──────────────────────────────────────────────────────────────
-def fetch_news(query: str, max_items: int = 5) -> list[dict]:
-    url = (f"https://news.google.com/rss/search?q={query.replace(' ', '+')}"
-           f"&hl=en-IN&gl=IN&ceid=IN:en")
-    feed = feedparser.parse(url)
-    results = []
-    for entry in feed.entries[:max_items]:
-        results.append({
-            "title":     entry.get("title", "No title"),
-            "link":      entry.get("link", "#"),
-            "published": entry.get("published", ""),
-            "source":    entry.get("source", {}).get("title", "Google News"),
-        })
-    return results
-
-
-# ── Render: Weather ───────────────────────────────────────────────────────────
-def render_weather(commodity: str) -> None:
-    st.markdown(f"#### {tx('weather_hdr')}")
-    for region, temp, condition in WEATHER_DATA[commodity]:
-        st.metric(label=region, value=temp, delta=condition, delta_color="off")
-
-
-# ── Render: DGFT Circulars ────────────────────────────────────────────────────
-def render_dgft(commodity: str) -> None:
-    st.markdown(f"#### {tx('dgft_hdr')}")
-    for title_en, body, issue_date in DGFT_ALERTS[commodity]:
-        date_str = issue_date.strftime("%d-%b-%Y")
-        relative = _relative_label(issue_date)
-        # Choose title language; always prepend the date tag
-        title_display = DGFT_TITLE_HI.get(title_en, title_en) if LNG == "hi" else title_en
-        label = f"[{date_str}]  {title_display}"
-        with st.expander(label):
-            st.caption(f"📅 {tx('issued_lbl')} {date_str} · {relative}")
-            st.write(body)
-
-
-# ── Render: News Feed ─────────────────────────────────────────────────────────
-def render_news(commodity: str, query: str) -> None:
-    st.markdown(f"#### {tx('news_hdr')}")
-    note = tx("news_note")
-    if note:
-        st.caption(note)
-    with st.spinner(tx("news_loading")):
-        articles = fetch_news(query)
-    if not articles:
-        st.info(tx("news_empty"))
-        return
-    for article in articles:
-        # In Hindi mode wrap with a bilingual prefix badge
-        prefix = "📰 " if LNG == "hi" else ""
-        st.markdown(
-            f"**{prefix}[{article['title']}]({article['link']})**  \n"
-            f"<span style='color:grey; font-size:0.8em'>"
-            f"{article['source']} &nbsp;·&nbsp; {article['published']}"
-            f"</span>",
-            unsafe_allow_html=True,
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    _, col, _ = st.columns([1, 1.1, 1])
+    with col:
+        st.markdown("""
+            <div style='text-align:center; padding:40px 32px; background:#ffffff;
+                        border-radius:20px; border:1px solid #e5e7eb;
+                        box-shadow:0 4px 24px rgba(0,0,0,0.07);'>
+                <div style='font-size:3rem'>🌾</div>
+                <h2 style='margin:8px 0 4px'>Grain Arbitrage Terminal</h2>
+                <p style='color:#6b7280; font-size:0.9rem; margin-bottom:24px'>
+                    Secure Trading Intelligence Platform
+                </p>
+            </div>
+        """, unsafe_allow_html=True)
+        st.markdown("")
+        entered = st.text_input(
+            "Dashboard Passcode",
+            type="password",
+            placeholder="Enter passcode…",
+            label_visibility="collapsed",
         )
-        st.divider()
+        if st.button("🔓  Enter Dashboard", use_container_width=True, type="primary"):
+            if entered == _PASSCODE:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect passcode — please try again.")
 
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
-def load_trades() -> pd.DataFrame:
+if not st.session_state.get("authenticated"):
+    render_login()
+    st.stop()   # ← nothing below this line runs unless authenticated
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTHENTICATED — SIDEBAR
+# ─────────────────────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.markdown("## ⚙️ Settings")
+    _lang_choice = st.radio("Language / भाषा", ["English", "Hindi"], horizontal=True)
+    _new_lng = "hi" if _lang_choice == "Hindi" else "en"
+    if _new_lng != LNG:
+        st.session_state["lang"] = _new_lng
+        st.rerun()
+
+    st.markdown("---")
+    if st.button("🚪 Logout", use_container_width=True):
+        st.session_state["authenticated"] = False
+        st.rerun()
+    st.caption("Grain Arbitrage Terminal v2.0\nPowered by OpenAI + Supabase")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATABASE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_all_trades() -> pd.DataFrame:
     try:
         with _engine.connect() as conn:
             return pd.read_sql_query(
-                "SELECT id, date, action, commodity, quantity, price, location "
-                "FROM physical_trades ORDER BY id DESC",
+                """SELECT id, date, sender_number, workflow_type, commodity,
+                          quantity, rate, warehouse_location, seller_name,
+                          buyer_name, delivery_date, status
+                   FROM   physical_trades
+                   ORDER  BY id DESC""",
                 conn,
             )
     except Exception:
         return pd.DataFrame()
+
+
+def insert_trade_manual(data: dict) -> int:
+    with _engine.begin() as conn:
+        result = conn.execute(
+            text("""
+                INSERT INTO physical_trades
+                    (date, sender_number, workflow_type, commodity, quantity,
+                     rate, warehouse_location, seller_name, buyer_name,
+                     delivery_date, status)
+                VALUES
+                    (:date, :sender_number, :workflow_type, :commodity, :quantity,
+                     :rate, :warehouse_location, :seller_name, :buyer_name,
+                     :delivery_date, :status)
+                RETURNING id
+            """),
+            data,
+        )
+        return result.fetchone()[0]
 
 
 def delete_trade(trade_id: int) -> bool:
@@ -328,280 +285,467 @@ def delete_trade(trade_id: int) -> bool:
         return False
 
 
-# ── Render: Net Warehouse Stock ───────────────────────────────────────────────
-def render_net_stock(df: pd.DataFrame) -> None:
-    st.markdown(f"#### {tx('net_stock_hdr')}")
+# ─────────────────────────────────────────────────────────────────────────────
+# MARKET INTELLIGENCE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
-    buy_df  = df[df["action"] == "buy"].copy()
-    sell_df = df[df["action"] == "sell"].copy()
+def _relative_label(issue_date: dt_date) -> str:
+    delta = (dt_date.today() - issue_date).days
+    if LNG == "hi":
+        if delta == 0:  return "आज"
+        if delta == 1:  return "कल"
+        if delta < 30:  return f"{delta} दिन पहले"
+        return f"{delta // 30} महीने पहले"
+    if delta == 0:  return "today"
+    if delta == 1:  return "yesterday"
+    if delta < 30:  return f"{delta} days ago"
+    return f"{delta // 30} month{'s' if delta // 30 > 1 else ''} ago"
 
-    buys  = buy_df.groupby("commodity")["quantity"].sum()
-    sells = sell_df.groupby("commodity")["quantity"].sum()
 
-    # Weighted average purchase price: Σ(qty × price) / Σ(qty)
-    if not buy_df.empty:
-        buy_df["value"] = buy_df["quantity"] * buy_df["price"]
-        wav_price = buy_df.groupby("commodity").apply(
-            lambda x: x["value"].sum() / x["quantity"].sum(),
-            include_groups=False,
-        )
-    else:
-        wav_price = pd.Series(dtype=float)
-
-    commodities = sorted(df["commodity"].unique())
-    rows = []
-    for commodity in commodities:
-        bought   = float(buys.get(commodity, 0.0))
-        sold     = float(sells.get(commodity, 0.0))
-        net      = bought - sold
-        avg_cost = float(wav_price.get(commodity, 0.0))
-
-        status = (tx("in_stock") if net > 0
-                  else tx("zero_stock") if net == 0
-                  else tx("oversold"))
-
-        rows.append({
-            tx("col_commodity"):  commodity.title(),
-            tx("col_net_wt"):     net,
-            tx("col_avg_price"):  round(avg_cost, 2),
-            tx("col_bought"):     bought,
-            tx("col_sold"):       sold,
-            tx("col_status"):     status,
-        })
-
-    # Metric cards — one per commodity
-    if rows:
-        card_cols = st.columns(len(rows))
-        for col, row in zip(card_cols, rows):
-            with col:
-                net_val  = row[tx("col_net_wt")]
-                avg_val  = row[tx("col_avg_price")]
-                avg_str  = f"₹{avg_val:,.0f}/qtl {tx('col_avg_price').split('(')[0].strip()}"
-                st.metric(
-                    label=f"{row[tx('col_status')]}  {row[tx('col_commodity')]}",
-                    value=f"{net_val:,.1f} qtl",
-                    delta=avg_str,
-                    delta_color="inverse" if net_val <= 0 else "off",
-                )
-
-    # Summary table with columns in a logical display order
-    col_order = [
-        tx("col_commodity"),
-        tx("col_net_wt"),
-        tx("col_avg_price"),
-        tx("col_bought"),
-        tx("col_sold"),
-        tx("col_status"),
+def fetch_news(query: str, max_items: int = 5) -> list[dict]:
+    url = (f"https://news.google.com/rss/search?q={query.replace(' ', '+')}"
+           f"&hl=en-IN&gl=IN&ceid=IN:en")
+    feed = feedparser.parse(url)
+    return [
+        {
+            "title":     e.get("title", "No title"),
+            "link":      e.get("link", "#"),
+            "published": e.get("published", ""),
+            "source":    e.get("source", {}).get("title", "Google News"),
+        }
+        for e in feed.entries[:max_items]
     ]
-    st.dataframe(pd.DataFrame(rows)[col_order], use_container_width=True, hide_index=True)
 
 
-# ── Render: Full Trade Log + Delete ──────────────────────────────────────────
-def render_trades() -> None:
-    # Red delete-button CSS
+# ─────────────────────────────────────────────────────────────────────────────
+# RENDER: LIVE INVENTORY
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _section_header(emoji: str, title: str, count: int) -> None:
     st.markdown(
-        """<style>
-        [data-testid="stForm"] button[kind="primaryFormSubmit"],
-        [data-testid="stForm"] button[data-testid="baseButton-primary"] {
-            background-color: #dc2626 !important;
-            border-color:     #dc2626 !important;
-            color: white !important;
-        }
-        [data-testid="stForm"] button[kind="primaryFormSubmit"]:hover,
-        [data-testid="stForm"] button[data-testid="baseButton-primary"]:hover {
-            background-color: #b91c1c !important;
-            border-color:     #b91c1c !important;
-        }
-        </style>""",
+        f"<h3 style='margin-bottom:4px'>{emoji} {title} "
+        f"<span style='font-size:0.75rem; color:#6b7280; font-weight:normal'>"
+        f"({count} {'entry' if count == 1 else 'entries'})</span></h3>",
         unsafe_allow_html=True,
     )
 
-    st.markdown(tx("inventory_hdr"))
-    df = load_trades()
 
+def render_inventory(df: pd.DataFrame) -> None:
     if df.empty:
         st.info(tx("no_trades"))
         return
 
-    # 1. Net stock aggregation
-    render_net_stock(df)
+    # ── Commodity filter (dynamic from DB) ───────────────────────────────────
+    unique_commodities = sorted(
+        df["commodity"].dropna().str.title().unique()
+    )
+    filter_opts = (["All Commodities"] if LNG == "en" else ["सभी अनाज"]) + unique_commodities
+    selected = st.selectbox(
+        "Filter by Commodity / अनाज चुनें" if LNG == "en" else "अनाज चुनें",
+        filter_opts,
+    )
+
+    if selected not in ("All Commodities", "सभी अनाज"):
+        df = df[df["commodity"].str.title() == selected]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 1 — WAREHOUSE STOCK (Warehousing)
+    # ─────────────────────────────────────────────────────────────────────────
+    wh = df[df["workflow_type"] == "Warehousing"].copy()
+    _section_header("🏭", "Current Warehouse Stock" if LNG == "en" else "गोदाम स्टॉक", len(wh))
+
+    if wh.empty:
+        st.info("No warehousing entries yet." if LNG == "en" else "कोई गोदाम प्रविष्टि नहीं।")
+    else:
+        # KPI metric cards
+        total_val = (wh["quantity"].fillna(0) * wh["rate"].fillna(0)).sum()
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Commodities" if LNG == "en" else "अनाज", wh["commodity"].nunique())
+        k2.metric("Total Quantity" if LNG == "en" else "कुल मात्रा",
+                  f"{wh['quantity'].sum():,.0f} qtl")
+        k3.metric("Total Value" if LNG == "en" else "कुल मूल्य",
+                  f"₹{total_val:,.0f}")
+        k4.metric("Locations" if LNG == "en" else "स्थान",
+                  wh["warehouse_location"].nunique())
+
+        # Weighted avg purchase price summary
+        wh_valid = wh.dropna(subset=["rate", "quantity"]).copy()
+        if not wh_valid.empty:
+            wh_valid["value"] = wh_valid["quantity"] * wh_valid["rate"]
+            wav = wh_valid.groupby("commodity").apply(
+                lambda x: x["value"].sum() / x["quantity"].sum(),
+                include_groups=False,
+            ).reset_index()
+            wav.columns = [
+                "Commodity",
+                "Avg Purchase Price (₹/Quintal)" if LNG == "en" else "औसत खरीद मूल्य (₹/क्विंटल)"
+            ]
+            net_qty = wh.groupby("commodity")["quantity"].sum().reset_index()
+            net_qty.columns = [
+                "Commodity",
+                "Net Qty (qtl)" if LNG == "en" else "नेट मात्रा (क्विंटल)"
+            ]
+            summary = wav.merge(net_qty, on="Commodity")
+            summary["Commodity"] = summary["Commodity"].str.title()
+            summary.iloc[:, 1] = summary.iloc[:, 1].map(lambda v: f"₹{v:,.0f}")
+            st.dataframe(summary, hide_index=True, use_container_width=True)
+
+        # Full log
+        with st.expander("View Full Warehouse Log" if LNG == "en" else "पूरा लॉग देखें"):
+            cols_wh = ["id", "date", "commodity", "quantity", "rate",
+                       "warehouse_location", "seller_name"]
+            rename_wh = {
+                "id": "ID", "date": "Date", "commodity": "Commodity",
+                "quantity": "Qty (qtl)", "rate": "Rate (₹/qtl)",
+                "warehouse_location": "Location", "seller_name": "Seller",
+            }
+            st.dataframe(
+                wh[cols_wh].rename(columns=rename_wh),
+                hide_index=True, use_container_width=True,
+            )
+
     st.markdown("---")
 
-    # 2. Raw trade log
-    st.markdown(f"#### {tx('trade_log_hdr')}")
-    display_df = df.copy()
-    display_df.columns = ["ID", "Date", "Action", "Commodity",
-                          "Qty (qtl)", "Price (₹/qtl)", "Location"]
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 2 — PROCESSING PIPELINES
+    # ─────────────────────────────────────────────────────────────────────────
+    proc = df[df["workflow_type"] == "Processing"].copy()
+    _section_header("⚙️", "Active Processing Pipelines" if LNG == "en" else "प्रोसेसिंग पाइपलाइन",
+                    len(proc))
 
-    # 3. Delete / undo entry
-    st.markdown(f"#### {tx('delete_hdr')}")
-    label_map: dict[int, str] = {
-        int(row["id"]): (
-            f"ID {int(row['id'])}  —  "
-            f"{str(row['action']).upper()}  "
-            f"{row['quantity']} qtl  "
-            f"{str(row['commodity']).title()}  "
-            f"@ ₹{row['price']}/qtl  "
-            f"({row['location']})"
+    if proc.empty:
+        st.info("No processing entries yet." if LNG == "en" else "कोई प्रोसेसिंग प्रविष्टि नहीं।")
+    else:
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Total Pending (qtl)" if LNG == "en" else "कुल लंबित (क्विंटल)",
+                  f"{proc['quantity'].sum():,.0f}")
+        p2.metric("Commodities" if LNG == "en" else "अनाज", proc["commodity"].nunique())
+        p3.metric("Locations" if LNG == "en" else "स्थान",
+                  proc["warehouse_location"].dropna().nunique())
+
+        cols_proc = ["id", "date", "commodity", "quantity",
+                     "warehouse_location", "status"]
+        rename_proc = {
+            "id": "ID", "date": "Date", "commodity": "Commodity",
+            "quantity": "Qty (qtl)", "warehouse_location": "Location", "status": "Status",
+        }
+        st.dataframe(
+            proc[cols_proc].rename(columns=rename_proc),
+            hide_index=True, use_container_width=True,
         )
-        for _, row in df.iterrows()
-    }
 
-    with st.form("delete_form"):
-        col_a, col_b = st.columns([3, 1])
-        with col_a:
-            selected_id = st.selectbox(
-                tx("delete_sel"),
-                options=list(label_map.keys()),
-                format_func=lambda i: label_map[i],
+    st.markdown("---")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SECTION 3 — DIRECT TRADE LEDGER
+    # ─────────────────────────────────────────────────────────────────────────
+    dt = df[df["workflow_type"] == "Direct Trade"].copy()
+    _section_header("🤝", "Direct Trade Ledger" if LNG == "en" else "डायरेक्ट ट्रेड लेजर", len(dt))
+
+    if dt.empty:
+        st.info("No direct trades yet." if LNG == "en" else "कोई डायरेक्ट ट्रेड नहीं।")
+    else:
+        d1, d2, d3 = st.columns(3)
+        total_dt_val = (dt["quantity"].fillna(0) * dt["rate"].fillna(0)).sum()
+        d1.metric("Total Trades" if LNG == "en" else "कुल ट्रेड", len(dt))
+        d2.metric("Volume (qtl)" if LNG == "en" else "मात्रा (क्विंटल)",
+                  f"{dt['quantity'].sum():,.0f}")
+        d3.metric("Trade Value" if LNG == "en" else "ट्रेड मूल्य",
+                  f"₹{total_dt_val:,.0f}")
+
+        cols_dt = ["id", "date", "commodity", "quantity", "rate",
+                   "seller_name", "buyer_name", "delivery_date"]
+        rename_dt = {
+            "id": "ID", "date": "Date", "commodity": "Commodity",
+            "quantity": "Qty (qtl)", "rate": "Rate (₹/qtl)",
+            "seller_name": "Seller", "buyer_name": "Buyer",
+            "delivery_date": "Delivery Date",
+        }
+        st.dataframe(
+            dt[cols_dt].rename(columns=rename_dt),
+            hide_index=True, use_container_width=True,
+        )
+
+    st.markdown("---")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # DELETE ENTRY (red button via CSS)
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("""<style>
+        [data-testid="stForm"] button[kind="primaryFormSubmit"],
+        [data-testid="stForm"] button[data-testid="baseButton-primary"] {
+            background-color: #dc2626 !important; border-color: #dc2626 !important;
+            color: white !important;
+        }
+    </style>""", unsafe_allow_html=True)
+
+    with st.expander("🗑️ Delete / Correct an Entry" if LNG == "en" else "🗑️ प्रविष्टि सुधारें / हटाएं"):
+        label_map = {
+            int(r["id"]): (
+                f"ID {int(r['id'])} — {str(r.get('workflow_type',''))[:2]} "
+                f"{str(r.get('commodity','')).title()} "
+                f"{r.get('quantity','')} qtl  ({r.get('date','')})"
             )
-        with col_b:
-            st.markdown("<br>", unsafe_allow_html=True)
-            submitted = st.form_submit_button(tx("delete_btn"), type="primary")
+            for _, r in df.iterrows()
+        }
+        with st.form("delete_form"):
+            col_a, col_b = st.columns([3, 1])
+            with col_a:
+                sel_id = st.selectbox(
+                    tx("delete_sel"),
+                    options=list(label_map.keys()),
+                    format_func=lambda i: label_map[i],
+                )
+            with col_b:
+                st.markdown("<br>", unsafe_allow_html=True)
+                del_submitted = st.form_submit_button(tx("delete_btn"), type="primary")
+
+        if del_submitted:
+            if delete_trade(sel_id):
+                st.success(f"Entry #{sel_id} deleted." if LNG == "en"
+                           else f"प्रविष्टि #{sel_id} हटा दी गई।")
+                st.rerun()
+            else:
+                st.error("Delete failed." if LNG == "en" else "हटाने में विफल।")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RENDER: MANUAL ENTRY WORKSPACE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_manual_entry() -> None:
+    st.markdown("## ✏️ Manual Trade Entry" if LNG == "en" else "## ✏️ मैन्युअल ट्रेड प्रविष्टि")
+    st.caption(
+        "Log historical entries directly into the Supabase database. "
+        "All fields marked * are required." if LNG == "en" else
+        "सीधे Supabase डेटाबेस में ऐतिहासिक प्रविष्टियां दर्ज करें। * अनिवार्य फ़ील्ड।"
+    )
+    st.markdown("")
+
+    _, form_col, _ = st.columns([0.5, 3, 0.5])
+    with form_col:
+        with st.form("manual_entry_form", clear_on_submit=True):
+            wf_options = ["Warehousing", "Processing", "Direct Trade"]
+            workflow_type = st.selectbox(
+                "Transaction Type *" if LNG == "en" else "लेनदेन प्रकार *",
+                wf_options,
+            )
+            commodity = st.text_input(
+                "Commodity * (e.g. chana, moong, wheat)" if LNG == "en"
+                else "अनाज * (जैसे चना, मूंग, गेहूं)"
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                quantity = st.number_input(
+                    "Quantity (quintals) *" if LNG == "en" else "मात्रा (क्विंटल) *",
+                    min_value=0.0, step=0.5, format="%.1f",
+                )
+            with c2:
+                rate = st.number_input(
+                    "Rate ₹/qtl (leave 0 for Processing)" if LNG == "en"
+                    else "दर ₹/क्विंटल (Processing के लिए 0 छोड़ें)",
+                    min_value=0.0, step=1.0, format="%.0f",
+                )
+
+            warehouse_location = st.text_input(
+                "Warehouse Location / City" if LNG == "en" else "गोदाम स्थान / शहर"
+            )
+
+            c3, c4 = st.columns(2)
+            with c3:
+                seller_name = st.text_input(
+                    "Seller Name" if LNG == "en" else "विक्रेता का नाम"
+                )
+            with c4:
+                buyer_name = st.text_input(
+                    "Buyer Name (Direct Trade only)" if LNG == "en"
+                    else "खरीदार का नाम (केवल Direct Trade)"
+                )
+
+            delivery_date = st.date_input(
+                "Delivery Date (Direct Trade only)" if LNG == "en"
+                else "डिलीवरी तिथि (केवल Direct Trade)",
+            )
+
+            submitted = st.form_submit_button(
+                "✅  Submit Entry" if LNG == "en" else "✅  प्रविष्टि सबमिट करें",
+                type="primary", use_container_width=True,
+            )
 
     if submitted:
-        if delete_trade(selected_id):
-            st.success(f"Trade ID {selected_id} removed." if LNG == "en"
-                       else f"ट्रेड ID {selected_id} सफलतापूर्वक हटा दी गई।")
-            st.rerun()
+        if not commodity.strip():
+            st.error("Commodity is required." if LNG == "en" else "अनाज का नाम अनिवार्य है।")
+            return
+        if quantity <= 0:
+            st.error("Quantity must be greater than 0." if LNG == "en"
+                     else "मात्रा 0 से अधिक होनी चाहिए।")
+            return
+
+        insert_data = {
+            "date":               dt_date.today().isoformat(),
+            "sender_number":      "manual_entry",
+            "workflow_type":      workflow_type,
+            "commodity":          commodity.strip().lower(),
+            "quantity":           quantity,
+            "rate":               rate if rate > 0 else None,
+            "warehouse_location": warehouse_location.strip() or None,
+            "seller_name":        seller_name.strip() or None,
+            "buyer_name":         buyer_name.strip() or None,
+            "delivery_date":      str(delivery_date) if workflow_type == "Direct Trade" else None,
+            "status":             "Pending" if workflow_type == "Processing" else None,
+        }
+
+        try:
+            new_id = insert_trade_manual(insert_data)
+            st.success(
+                f"✅ Entry #{new_id} logged — {workflow_type} · "
+                f"{commodity.strip().title()} · {quantity:,.0f} qtl"
+                if LNG == "en" else
+                f"✅ प्रविष्टि #{new_id} दर्ज — {workflow_type} · "
+                f"{commodity.strip().title()} · {quantity:,.0f} क्विंटल"
+            )
+            st.balloons()
+        except Exception as exc:
+            st.error(f"Database insert failed: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RENDER: MARKET INTELLIGENCE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_market_intel() -> None:
+    st.markdown("## 📰 Market Intelligence" if LNG == "en" else "## 📰 बाज़ार इंटेलिजेंस")
+
+    # Commodity selector — pre-built list + free search
+    sel_commodity = st.selectbox(
+        "Select commodity for intelligence feed" if LNG == "en"
+        else "इंटेलिजेंस फीड के लिए अनाज चुनें",
+        list(COMMODITIES.keys()),
+    )
+    query = COMMODITIES[sel_commodity]
+
+    col1, col2, col3 = st.columns([1, 1, 1.4])
+
+    with col1:
+        st.markdown(f"#### {tx('weather_hdr')}")
+        for region, temp, condition in WEATHER_DATA[sel_commodity]:
+            st.metric(label=region, value=temp, delta=condition, delta_color="off")
+
+    with col2:
+        st.markdown(f"#### {tx('dgft_hdr')}")
+        for title_en, body, issue_date in DGFT_ALERTS[sel_commodity]:
+            date_str = issue_date.strftime("%d-%b-%Y")
+            relative = _relative_label(issue_date)
+            title_display = DGFT_TITLE_HI.get(title_en, title_en) if LNG == "hi" else title_en
+            with st.expander(f"[{date_str}]  {title_display}"):
+                st.caption(f"📅 {tx('issued_lbl')} {date_str} · {relative}")
+                st.write(body)
+
+    with col3:
+        st.markdown(f"#### {tx('news_hdr')}")
+        note = tx("news_note")
+        if note:
+            st.caption(note)
+        with st.spinner(tx("news_loading")):
+            articles = fetch_news(query)
+        if not articles:
+            st.info(tx("news_empty"))
         else:
-            st.error(f"Could not delete Trade ID {selected_id}." if LNG == "en"
-                     else f"ट्रेड ID {selected_id} नहीं हटाई जा सकी।")
+            for art in articles:
+                prefix = "📰 " if LNG == "hi" else ""
+                st.markdown(
+                    f"**{prefix}[{art['title']}]({art['link']})**  \n"
+                    f"<span style='color:grey; font-size:0.8em'>"
+                    f"{art['source']} &nbsp;·&nbsp; {art['published']}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.divider()
 
 
-# ── Signal engine ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# RENDER: AI ARBITRAGE PREDICTOR
+# ─────────────────────────────────────────────────────────────────────────────
+
 def compute_arbitrage_signal(commodity: str) -> dict:
-    """
-    Evaluate DGFT policy + regional weather and return:
-        trend_key        – 'bullish' | 'bearish' | 'neutral'  (maps to T keys)
-        signals          – list of (description_en, direction, weight)
-        net_score        – signed int
-        ncdex_ref        – reference NCDEX futures ₹/qtl
-        predicted_spread – estimated NCDEX–mandi spread ₹/qtl
-        predicted_mandi  – implied mandi price ₹/qtl
-        confidence       – arbitrage signal strength 0–100 %
-    """
     signals: list[tuple[str, str, int]] = []
     net_score = 0
 
-    # ── Policy signals ────────────────────────────────────────────────────────
     for title_en, _body, _date in DGFT_ALERTS[commodity]:
         t = title_en.upper()
         if "STOCK LIMIT" in t:
-            signals.append(("📋 Stock limit enforcement — curbs hoarding, depresses spot", "BEARISH", -2))
-            net_score -= 2
+            signals.append(("📋 Stock limit enforcement — depresses spot", "BEARISH", -2)); net_score -= 2
         if "BUFFER" in t:
-            signals.append(("🏛️ NAFED buffer release adding supply to market", "BEARISH", -3))
-            net_score -= 3
+            signals.append(("🏛️ NAFED buffer release adding supply", "BEARISH", -3)); net_score -= 3
         if "EXPORT INCENTIVE" in t or "SEZ" in t:
-            signals.append(("🚢 Export demand stimulus / SEZ window active", "BULLISH", +2))
-            net_score += 2
+            signals.append(("🚢 Export stimulus / SEZ window active", "BULLISH", +2)); net_score += 2
         if "IMPORT DUTY" in t:
-            signals.append(("🛡️ High import duty protects domestic price floor", "BULLISH", +1))
-            net_score += 1
+            signals.append(("🛡️ High import duty protects price floor", "BULLISH", +1)); net_score += 1
         if "MSP" in t:
-            signals.append(("💰 Govt. MSP provides hard price-floor support", "BULLISH", +1))
-            net_score += 1
+            signals.append(("💰 Govt. MSP provides price-floor support", "BULLISH", +1)); net_score += 1
         if "AFLATOXIN" in t or "QUALITY" in t:
-            signals.append(("⚠️ Quality/safety advisory suppresses export premium", "BEARISH", -1))
-            net_score -= 1
+            signals.append(("⚠️ Quality advisory suppresses export premium", "BEARISH", -1)); net_score -= 1
 
-    # ── Weather signals ───────────────────────────────────────────────────────
     for region, _temp, condition in WEATHER_DATA[commodity]:
         cond = condition.lower()
         if any(w in cond for w in ["dry", "arid", "no rain", "high uv"]):
-            signals.append((f"☀️ {region}: dry spell / moisture deficit → supply risk", "BULLISH", +2))
-            net_score += 2
+            signals.append((f"☀️ {region}: dry spell → supply risk", "BULLISH", +2)); net_score += 2
         elif any(w in cond for w in ["light shower", "light rain"]):
-            signals.append((f"🌦️ {region}: light rainfall → neutral supply impact", "NEUTRAL", 0))
+            signals.append((f"🌦️ {region}: light rain → neutral", "NEUTRAL", 0))
         elif any(w in cond for w in ["shower", "rain", "flood"]):
-            signals.append((f"🌧️ {region}: rainfall → improved supply outlook", "BEARISH", -1))
-            net_score -= 1
+            signals.append((f"🌧️ {region}: rainfall → improved supply", "BEARISH", -1)); net_score -= 1
         elif "wind" in cond:
-            signals.append((f"💨 {region}: strong winds → minor moisture crop stress", "BULLISH", +1))
-            net_score += 1
+            signals.append((f"💨 {region}: strong winds → minor crop stress", "BULLISH", +1)); net_score += 1
 
-    # ── Derived metrics ───────────────────────────────────────────────────────
-    ncdex_ref        = BASE_NCDEX[commodity]
-    adjusted_spread  = max(50.0, BASE_SPREAD[commodity] + net_score * 18)
-    predicted_mandi  = ncdex_ref - adjusted_spread
-    confidence       = int(min(85, 50 + abs(net_score) * 5))
-
-    trend_key = "bullish" if net_score >= 2 else ("bearish" if net_score <= -2 else "neutral")
-
+    ncdex_ref       = BASE_NCDEX[commodity]
+    adj_spread      = max(50.0, BASE_SPREAD[commodity] + net_score * 18)
+    trend_key       = "bullish" if net_score >= 2 else ("bearish" if net_score <= -2 else "neutral")
     return {
-        "trend_key":        trend_key,
-        "signals":          signals,
-        "net_score":        net_score,
-        "ncdex_ref":        ncdex_ref,
-        "predicted_spread": adjusted_spread,
-        "predicted_mandi":  predicted_mandi,
-        "confidence":       confidence,
+        "trend_key": trend_key, "signals": signals, "net_score": net_score,
+        "ncdex_ref": ncdex_ref, "predicted_spread": adj_spread,
+        "predicted_mandi": ncdex_ref - adj_spread,
+        "confidence": int(min(85, 50 + abs(net_score) * 5)),
     }
 
 
-# ── Render: AI Predictor Tab ──────────────────────────────────────────────────
 def render_ai_predictor(trade_count: int) -> None:
-    THRESHOLD = 30
+    THRESHOLD    = 30
     TREND_COLORS = {"bullish": "#16a34a", "bearish": "#dc2626", "neutral": "#d97706"}
 
     st.markdown(tx("ai_hdr"))
     st.caption(tx("ai_caption"))
     st.markdown("---")
 
-    inner_tabs = st.tabs([tx(COMMODITY_TAB_KEY[c]) for c in COMMODITIES])
-
+    inner_tabs = st.tabs(list(COMMODITIES.keys()))
     for inner_tab, commodity in zip(inner_tabs, COMMODITIES.keys()):
         with inner_tab:
-            r     = compute_arbitrage_signal(commodity)
-            color = TREND_COLORS[r["trend_key"]]
-
-            # ── Trend banner ──────────────────────────────────────────────────
-            trend_label  = tx(r["trend_key"])
-            advice_text  = tx(f"advice_{r['trend_key']}")
+            r          = compute_arbitrage_signal(commodity)
+            color      = TREND_COLORS[r["trend_key"]]
+            advice_key = "advice_" + r["trend_key"]
             st.markdown(
-                f"<h2 style='color:{color}; margin-bottom:2px'>{trend_label}</h2>"
-                f"<p style='color:#555; margin-top:2px; font-size:0.95em'>{advice_text}</p>",
+                f"<h2 style='color:{color}; margin-bottom:2px'>{tx(r['trend_key'])}</h2>"
+                f"<p style='color:#555; margin-top:2px; font-size:0.95em'>{tx(advice_key)}</p>",
                 unsafe_allow_html=True,
             )
             st.markdown("")
 
-            # ── Five metric cards ─────────────────────────────────────────────
             m1, m2, m3, m4, m5 = st.columns(5)
-            with m1:
-                st.metric(tx("lbl_ncdex"),
-                          f"₹{r['ncdex_ref']:,.0f}",
-                          help="Approximate active-month NCDEX futures price used as the baseline.")
-            with m2:
-                st.metric(tx("lbl_mandi"),
-                          f"₹{r['predicted_mandi']:,.0f}",
-                          delta=f"−₹{r['predicted_spread']:,.0f} vs NCDEX",
-                          delta_color="off")
-            with m3:
-                st.metric(tx("lbl_spread"),
-                          f"₹{r['predicted_spread']:,.0f}/qtl",
-                          help="Wider spread = larger physical–futures arbitrage window.")
-            with m4:
-                st.metric(tx("lbl_bias"),
-                          trend_label,
-                          delta=f"Score: {r['net_score']:+d}",
-                          delta_color="normal" if r["net_score"] >= 0 else "inverse")
-            with m5:
-                st.metric(tx("lbl_strength"),
-                          f"{r['confidence']}%",
-                          delta="Macro-rule baseline",
-                          delta_color="off")
-
+            m1.metric(tx("lbl_ncdex"), f"₹{r['ncdex_ref']:,.0f}")
+            m2.metric(tx("lbl_mandi"), f"₹{r['predicted_mandi']:,.0f}",
+                      delta=f"−₹{r['predicted_spread']:,.0f} vs NCDEX", delta_color="off")
+            m3.metric(tx("lbl_spread"), f"₹{r['predicted_spread']:,.0f}/qtl")
+            m4.metric(tx("lbl_bias"), tx(r["trend_key"]),
+                      delta=f"Score: {r['net_score']:+d}",
+                      delta_color="normal" if r["net_score"] >= 0 else "inverse")
+            m5.metric(tx("lbl_strength"), f"{r['confidence']}%",
+                      delta="Macro-rule baseline", delta_color="off")
             st.markdown("")
 
-            # ── Signal breakdown ──────────────────────────────────────────────
             st.markdown(f"#### {tx('signals_hdr')}")
             if r["signals"]:
                 for desc, direction, weight in r["signals"]:
                     badge = ("#16a34a" if direction == "BULLISH"
-                             else "#dc2626" if direction == "BEARISH"
-                             else "#d97706")
+                             else "#dc2626" if direction == "BEARISH" else "#d97706")
                     w_str = f"+{weight}" if weight > 0 else str(weight)
                     st.markdown(
                         f"<div style='display:flex; justify-content:space-between; align-items:center;"
@@ -616,24 +760,17 @@ def render_ai_predictor(trade_count: int) -> None:
                 st.info(tx("no_signals"))
 
             st.markdown("")
-
-            # ── Engine mode footer ────────────────────────────────────────────
-            pct      = min(100, int(trade_count / THRESHOLD * 100))
-            filled   = int(pct / 5)
-            bar      = "🟩" * filled + "⬜" * (20 - filled)
-            remain   = max(0, THRESHOLD - trade_count)
-            word     = "trade" if trade_count == 1 else "trades"
-
-            mode_line = tx("engine_ml") if trade_count >= THRESHOLD else tx("engine_macro")
-            body_line = tx("engine_body", n=THRESHOLD)
-            data_line = (f"Data Accumulation: **{trade_count} {word} recorded**."
-                         if LNG == "en"
-                         else f"डेटा संचय: **{trade_count} ट्रेड दर्ज**।")
-            remain_line = (f"{bar} &nbsp; {pct}% toward ML unlock — **{remain} entries remaining**"
-                           if LNG == "en"
-                           else f"{bar} &nbsp; {pct}% — ML अनलॉक के लिए **{remain} प्रविष्टियां शेष**")
-
-            st.info(f"{mode_line}  \n{data_line}  \n{remain_line}  \n\n{body_line}")
+            pct    = min(100, int(trade_count / THRESHOLD * 100))
+            bar    = "🟩" * int(pct / 5) + "⬜" * (20 - int(pct / 5))
+            remain = max(0, THRESHOLD - trade_count)
+            mode   = tx("engine_ml") if trade_count >= THRESHOLD else tx("engine_macro")
+            st.info(
+                f"{mode}  \n"
+                f"{'Data Accumulation' if LNG == 'en' else 'डेटा संचय'}: "
+                f"**{trade_count} {'trade' if trade_count == 1 else 'trades'} recorded**.  \n"
+                f"{bar} &nbsp; {pct}% — **{remain} entries remaining**  \n\n"
+                f"{tx('engine_body', n=THRESHOLD)}"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -643,30 +780,24 @@ def render_ai_predictor(trade_count: int) -> None:
 st.title(tx("app_title"))
 st.caption(tx("app_caption"))
 
-# ── Main tabs ─────────────────────────────────────────────────────────────────
-_tab_labels = [tx(COMMODITY_TAB_KEY[c]) for c in COMMODITIES] + [tx("tab_ai")]
-_all_tabs   = st.tabs(_tab_labels)
-_comm_tabs  = _all_tabs[:-1]
-_ai_tab     = _all_tabs[-1]
+_df = load_all_trades()
 
-for tab, (commodity, query) in zip(_comm_tabs, COMMODITIES.items()):
-    with tab:
-        col1, col2, col3 = st.columns([1, 1, 1.4])
-        with col1:
-            render_weather(commodity)
-        with col2:
-            render_dgft(commodity)
-        with col3:
-            render_news(commodity, query)
+tab_inv, tab_intel, tab_entry, tab_ai = st.tabs([
+    tx("tab_inventory"), tx("tab_intel"), tx("tab_entry"), tx("tab_ai"),
+])
 
-with _ai_tab:
-    _trade_df = load_trades()
-    render_ai_predictor(len(_trade_df))
+with tab_inv:
+    render_inventory(_df)
 
-# ── Inventory & trades section ────────────────────────────────────────────────
-st.markdown("---")
-render_trades()
+with tab_intel:
+    render_market_intel()
 
-# ── Auto-refresh every 60 seconds ─────────────────────────────────────────────
+with tab_entry:
+    render_manual_entry()
+
+with tab_ai:
+    render_ai_predictor(len(_df))
+
+# ── Auto-refresh every 60 seconds ────────────────────────────────────────────
 time.sleep(60)
 st.rerun()
