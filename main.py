@@ -62,11 +62,27 @@ Example output:
 {"workflow_type":"Warehousing","commodity":"groundnut","quantity":150,"rate":6800,"warehouse_location":"Rajkot Godown","seller_name":"Gujarat Agro"}
 
 ────────────────────────────────────────────────
+TRADE ACTION — include in every response:
+Analyze the message intent and add "trade_action" to the JSON:
+- "Purchase" — user is buying goods, setting up stock, receiving material,
+  kharidi karna, godown mein aana, stock banana, warehousing inward.
+- "Sale"     — user is selling or dispatching material, bikri karna,
+  maal bheja, dispatch, outward movement.
+- "Processing" — material sent for sorting, grading, cleaning (use only
+  when workflow_type is also "Processing").
+
+────────────────────────────────────────────────
 Rules:
-- Use null for any field that is genuinely absent in the message.
+- Always include "trade_action" in every JSON response.
+- Use null for any other field that is genuinely absent in the message.
 - quantity is always a plain number (quintals unless stated otherwise).
 - rate is price per quintal as a plain number.
 - Output ONLY the JSON object — no text before or after it.
+
+Updated examples with trade_action:
+{"workflow_type":"Warehousing","trade_action":"Purchase","commodity":"chana","quantity":200,"rate":5200,"warehouse_location":"Indore","seller_name":"Ramesh"}
+{"workflow_type":"Direct Trade","trade_action":"Sale","commodity":"moong","quantity":100,"rate":8500,"seller_name":"Ramesh","buyer_name":"Saurabh","delivery_date":"2026-06-10"}
+{"workflow_type":"Processing","trade_action":"Processing","commodity":"chana","quantity":150,"warehouse_location":"Indore","status":"Pending"}
 """.strip()
 
 
@@ -96,6 +112,7 @@ def init_db() -> None:
         for col, col_type in [
             ("sender_number",      "TEXT"),
             ("workflow_type",      "TEXT"),
+            ("trade_action",       "TEXT"),
             ("rate",               "REAL"),
             ("warehouse_location", "TEXT"),
             ("seller_name",        "TEXT"),
@@ -125,11 +142,11 @@ def insert_trade(data: dict) -> int:
         result = conn.execute(
             text("""
                 INSERT INTO physical_trades
-                    (date, sender_number, workflow_type, commodity, quantity,
+                    (date, sender_number, workflow_type, trade_action, commodity, quantity,
                      rate, warehouse_location, seller_name, buyer_name,
                      delivery_date, status)
                 VALUES
-                    (:date, :sender_number, :workflow_type, :commodity, :quantity,
+                    (:date, :sender_number, :workflow_type, :trade_action, :commodity, :quantity,
                      :rate, :warehouse_location, :seller_name, :buyer_name,
                      :delivery_date, :status)
                 RETURNING id
@@ -345,6 +362,7 @@ async def receive_whatsapp(request: Request):
         "date":               date.today().isoformat(),
         "sender_number":      sender,
         "workflow_type":      workflow_type,
+        "trade_action":       data.get("trade_action"),
         "commodity":          commodity,
         "quantity":           quantity,
         "rate":               _safe_float(data.get("rate")),
