@@ -247,13 +247,18 @@ def load_all_trades() -> tuple[pd.DataFrame, str | None]:
     try:
         with _engine.connect() as conn:
             df = pd.read_sql_query(
-                """SELECT id, date, sender_number, workflow_type, commodity,
-                          quantity, rate, warehouse_location, seller_name,
-                          buyer_name, delivery_date, status
+                """SELECT id, date, sender_number, workflow_type, trade_action,
+                          commodity, quantity, rate, warehouse_location,
+                          seller_name, buyer_name, delivery_date, status
                    FROM   physical_trades
                    ORDER  BY id DESC""",
                 conn,
             )
+        # Legacy rows created before trade_action existed have NULL.
+        # Warehousing stock is inherently a purchase, so default those to "Purchase".
+        if "trade_action" in df.columns and "workflow_type" in df.columns:
+            mask = df["trade_action"].isna() & (df["workflow_type"] == "Warehousing")
+            df.loc[mask, "trade_action"] = "Purchase"
         return df, None
     except Exception as exc:
         return pd.DataFrame(), str(exc)
@@ -264,11 +269,11 @@ def insert_trade_manual(data: dict) -> int:
         result = conn.execute(
             text("""
                 INSERT INTO physical_trades
-                    (date, sender_number, workflow_type, commodity, quantity,
+                    (date, sender_number, workflow_type, trade_action, commodity, quantity,
                      rate, warehouse_location, seller_name, buyer_name,
                      delivery_date, status)
                 VALUES
-                    (:date, :sender_number, :workflow_type, :commodity, :quantity,
+                    (:date, :sender_number, :workflow_type, :trade_action, :commodity, :quantity,
                      :rate, :warehouse_location, :seller_name, :buyer_name,
                      :delivery_date, :status)
                 RETURNING id
@@ -626,6 +631,10 @@ def render_manual_entry() -> None:
                 "Transaction Type *" if LNG == "en" else "लेनदेन प्रकार *",
                 wf_options,
             )
+            trade_action = st.selectbox(
+                "Trade Action *" if LNG == "en" else "ट्रेड क्रिया *",
+                ["Purchase", "Sale", "Processing"],
+            )
             commodity = st.text_input(
                 "Commodity * (e.g. chana, moong, wheat)" if LNG == "en"
                 else "अनाज * (जैसे चना, मूंग, गेहूं)"
@@ -682,6 +691,7 @@ def render_manual_entry() -> None:
             "date":               dt_date.today().isoformat(),
             "sender_number":      "manual_entry",
             "workflow_type":      workflow_type,
+            "trade_action":       trade_action,
             "commodity":          commodity.strip().lower(),
             "quantity":           quantity,
             "rate":               rate if rate > 0 else None,
