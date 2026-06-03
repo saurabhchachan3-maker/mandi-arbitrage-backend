@@ -3,6 +3,7 @@ import time
 from datetime import date as dt_date
 
 import feedparser
+import numpy as np
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
@@ -325,6 +326,79 @@ def fetch_news(query: str, max_items: int = 5) -> list[dict]:
 # RENDER: LIVE INVENTORY
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _build_ledger_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Transform a flat trades DataFrame into a double-entry ledger view.
+
+    Purchase side  →  Pur_Qty  | Pur_Rate  | Pur_Value
+    Sale side      →  Sale_Qty | Sale_Rate | Sale_Value
+
+    Rows where trade_action is neither 'Purchase' nor 'Sale' get NaN on
+    both sides so they still appear in the table without polluting totals.
+    """
+    df = df.copy()
+    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
+    df["rate"]     = pd.to_numeric(df["rate"],     errors="coerce")
+    df["_value"]   = df["quantity"] * df["rate"]
+
+    is_pur  = df.get("trade_action", pd.Series(dtype=str)) == "Purchase"
+    is_sale = df.get("trade_action", pd.Series(dtype=str)) == "Sale"
+
+    df["Pur_Qty"]    = np.where(is_pur,  df["quantity"], np.nan)
+    df["Pur_Rate"]   = np.where(is_pur,  df["rate"],     np.nan)
+    df["Pur_Value"]  = np.where(is_pur,  df["_value"],   np.nan)
+    df["Sale_Qty"]   = np.where(is_sale, df["quantity"], np.nan)
+    df["Sale_Rate"]  = np.where(is_sale, df["rate"],     np.nan)
+    df["Sale_Value"] = np.where(is_sale, df["_value"],   np.nan)
+
+    # Columns that must be present before selecting
+    base_cols   = ["date", "commodity", "warehouse_location"]
+    ledger_cols = ["Pur_Qty", "Pur_Rate", "Pur_Value",
+                   "Sale_Qty", "Sale_Rate", "Sale_Value"]
+    available   = [c for c in base_cols + ledger_cols if c in df.columns]
+
+    rename_map = {
+        "date":               "Date",
+        "commodity":          "Commodity",
+        "warehouse_location": "Place",
+        "Pur_Qty":            "Pur Qty (Qtl)",
+        "Pur_Rate":           "Pur Rate (₹)",
+        "Pur_Value":          "Pur Value (₹)",
+        "Sale_Qty":           "Sale Qty (Qtl)",
+        "Sale_Rate":          "Sale Rate (₹)",
+        "Sale_Value":         "Sale Value (₹)",
+    }
+    return df[available].rename(columns=rename_map)
+
+
+def _ledger_kpis(df: pd.DataFrame) -> None:
+    """Render a 6-column KPI strip: purchase side | sale side | net."""
+    df = df.copy()
+    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
+    df["rate"]     = pd.to_numeric(df["rate"],     errors="coerce")
+    df["_value"]   = df["quantity"] * df["rate"]
+
+    is_pur  = df.get("trade_action", pd.Series(dtype=str)) == "Purchase"
+    is_sale = df.get("trade_action", pd.Series(dtype=str)) == "Sale"
+
+    pur_qty = df.loc[is_pur,  "quantity"].sum()
+    pur_val = df.loc[is_pur,  "_value"].sum()
+    sale_qty = df.loc[is_sale, "quantity"].sum()
+    sale_val = df.loc[is_sale, "_value"].sum()
+    net_qty  = pur_qty - sale_qty
+    net_val  = pur_val - sale_val
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("🟢 Pur Qty (qtl)"  if LNG == "en" else "🟢 खरीद मात्रा",  f"{pur_qty:,.0f}")
+    c2.metric("🟢 Pur Value (₹)"  if LNG == "en" else "🟢 खरीद मूल्य",   f"₹{pur_val:,.0f}")
+    c3.metric("🔴 Sale Qty (qtl)" if LNG == "en" else "🔴 बिक्री मात्रा", f"{sale_qty:,.0f}")
+    c4.metric("🔴 Sale Value (₹)" if LNG == "en" else "🔴 बिक्री मूल्य",  f"₹{sale_val:,.0f}")
+    c5.metric("⚖️ Net Qty (qtl)"  if LNG == "en" else "⚖️ नेट मात्रा",   f"{net_qty:,.0f}",
+              delta_color="normal" if net_qty >= 0 else "inverse")
+    c6.metric("⚖️ Net Value (₹)"  if LNG == "en" else "⚖️ नेट मूल्य",    f"₹{net_val:,.0f}",
+              delta_color="normal" if net_val >= 0 else "inverse")
+
+
 def _section_header(emoji: str, title: str, count: int) -> None:
     st.markdown(
         f"<h3 style='margin-bottom:4px'>{emoji} {title} "
@@ -366,52 +440,36 @@ def render_inventory(df: pd.DataFrame, db_error: str | None = None) -> None:
     if wh.empty:
         st.info("No warehousing entries yet." if LNG == "en" else "कोई गोदाम प्रविष्टि नहीं।")
     else:
-        # KPI metric cards
-        total_val = (wh["quantity"].fillna(0) * wh["rate"].fillna(0)).sum()
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Commodities" if LNG == "en" else "अनाज", wh["commodity"].nunique())
-        k2.metric("Total Quantity" if LNG == "en" else "कुल मात्रा",
-                  f"{wh['quantity'].sum():,.0f} qtl")
-        k3.metric("Total Value" if LNG == "en" else "कुल मूल्य",
-                  f"₹{total_val:,.0f}")
-        k4.metric("Locations" if LNG == "en" else "स्थान",
-                  wh["warehouse_location"].nunique())
+        # Purchase / Sale / Net KPI strip
+        _ledger_kpis(wh)
+        st.markdown("")
 
-        # Weighted avg purchase price summary
-        wh_valid = wh.dropna(subset=["rate", "quantity"]).copy()
-        if not wh_valid.empty:
-            wh_valid["value"] = wh_valid["quantity"] * wh_valid["rate"]
-            wav = wh_valid.groupby("commodity").apply(
-                lambda x: x["value"].sum() / x["quantity"].sum(),
-                include_groups=False,
-            ).reset_index()
-            wav.columns = [
-                "Commodity",
-                "Avg Purchase Price (₹/Quintal)" if LNG == "en" else "औसत खरीद मूल्य (₹/क्विंटल)"
-            ]
-            net_qty = wh.groupby("commodity")["quantity"].sum().reset_index()
-            net_qty.columns = [
-                "Commodity",
-                "Net Qty (qtl)" if LNG == "en" else "नेट मात्रा (क्विंटल)"
-            ]
-            summary = wav.merge(net_qty, on="Commodity")
-            summary["Commodity"] = summary["Commodity"].str.title()
-            summary.iloc[:, 1] = summary.iloc[:, 1].map(lambda v: f"₹{v:,.0f}")
-            st.dataframe(summary, hide_index=True, use_container_width=True)
+        # Double-entry ledger table
+        ledger_wh = _build_ledger_df(wh)
+        st.dataframe(
+            ledger_wh.style.format(
+                {c: "{:,.0f}" for c in ledger_wh.columns
+                 if any(k in c for k in ["Qty", "Rate", "Value"])},
+                na_rep="—",
+            ),
+            hide_index=True, use_container_width=True,
+        )
 
-        # Full log
-        with st.expander("View Full Warehouse Log" if LNG == "en" else "पूरा लॉग देखें"):
-            cols_wh = ["id", "date", "commodity", "quantity", "rate",
-                       "warehouse_location", "seller_name"]
-            rename_wh = {
-                "id": "ID", "date": "Date", "commodity": "Commodity",
-                "quantity": "Qty (qtl)", "rate": "Rate (₹/qtl)",
-                "warehouse_location": "Location", "seller_name": "Seller",
-            }
-            st.dataframe(
-                wh[cols_wh].rename(columns=rename_wh),
-                hide_index=True, use_container_width=True,
-            )
+        # Weighted avg per commodity (collapsed)
+        with st.expander("📊 Avg Cost Summary" if LNG == "en" else "📊 औसत लागत सारांश"):
+            wh_valid = wh.dropna(subset=["rate", "quantity"]).copy()
+            if not wh_valid.empty:
+                wh_valid["value"] = pd.to_numeric(wh_valid["quantity"], errors="coerce") \
+                                  * pd.to_numeric(wh_valid["rate"], errors="coerce")
+                wav = wh_valid.groupby("commodity").apply(
+                    lambda x: x["value"].sum() / x["quantity"].sum(),
+                    include_groups=False,
+                ).reset_index()
+                wav.columns = ["Commodity", "Avg Purchase Price (₹/Quintal)"]
+                wav["Commodity"] = wav["Commodity"].str.title()
+                wav["Avg Purchase Price (₹/Quintal)"] = \
+                    wav["Avg Purchase Price (₹/Quintal)"].map(lambda v: f"₹{v:,.0f}")
+                st.dataframe(wav, hide_index=True, use_container_width=True)
 
     st.markdown("---")
 
@@ -454,24 +512,23 @@ def render_inventory(df: pd.DataFrame, db_error: str | None = None) -> None:
     if dt.empty:
         st.info("No direct trades yet." if LNG == "en" else "कोई डायरेक्ट ट्रेड नहीं।")
     else:
-        d1, d2, d3 = st.columns(3)
-        total_dt_val = (dt["quantity"].fillna(0) * dt["rate"].fillna(0)).sum()
-        d1.metric("Total Trades" if LNG == "en" else "कुल ट्रेड", len(dt))
-        d2.metric("Volume (qtl)" if LNG == "en" else "मात्रा (क्विंटल)",
-                  f"{dt['quantity'].sum():,.0f}")
-        d3.metric("Trade Value" if LNG == "en" else "ट्रेड मूल्य",
-                  f"₹{total_dt_val:,.0f}")
+        # Purchase / Sale / Net KPI strip
+        _ledger_kpis(dt)
+        st.markdown("")
 
-        cols_dt = ["id", "date", "commodity", "quantity", "rate",
-                   "seller_name", "buyer_name", "delivery_date"]
-        rename_dt = {
-            "id": "ID", "date": "Date", "commodity": "Commodity",
-            "quantity": "Qty (qtl)", "rate": "Rate (₹/qtl)",
-            "seller_name": "Seller", "buyer_name": "Buyer",
-            "delivery_date": "Delivery Date",
-        }
+        # Double-entry ledger (seller / buyer appended as extra context cols)
+        ledger_dt = _build_ledger_df(dt)
+        # Attach seller / buyer columns if present
+        for extra_col, extra_label in [("seller_name", "Seller"), ("buyer_name", "Buyer"),
+                                        ("delivery_date", "Delivery Date")]:
+            if extra_col in dt.columns:
+                ledger_dt[extra_label] = dt[extra_col].values
         st.dataframe(
-            dt[cols_dt].rename(columns=rename_dt),
+            ledger_dt.style.format(
+                {c: "{:,.0f}" for c in ledger_dt.columns
+                 if any(k in c for k in ["Qty", "Rate", "Value"])},
+                na_rep="—",
+            ),
             hide_index=True, use_container_width=True,
         )
 
@@ -485,7 +542,15 @@ def render_inventory(df: pd.DataFrame, db_error: str | None = None) -> None:
                         else "अवर्गीकृत प्रविष्टियां", len(unclassified))
         st.caption("These rows have no workflow_type (old schema entries)." if LNG == "en"
                    else "इन प्रविष्टियों में workflow_type नहीं है।")
-        st.dataframe(unclassified, hide_index=True, use_container_width=True)
+        ledger_unc = _build_ledger_df(unclassified)
+        st.dataframe(
+            ledger_unc.style.format(
+                {c: "{:,.0f}" for c in ledger_unc.columns
+                 if any(k in c for k in ["Qty", "Rate", "Value"])},
+                na_rep="—",
+            ),
+            hide_index=True, use_container_width=True,
+        )
 
     st.markdown("---")
 
