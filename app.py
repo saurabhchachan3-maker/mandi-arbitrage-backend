@@ -336,13 +336,19 @@ def _build_ledger_df(df: pd.DataFrame) -> pd.DataFrame:
     Rows where trade_action is neither 'Purchase' nor 'Sale' get NaN on
     both sides so they still appear in the table without polluting totals.
     """
-    df = df.copy()
+    df = df.copy().reset_index(drop=True)          # ← reset so index is always 0,1,2…
     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
     df["rate"]     = pd.to_numeric(df["rate"],     errors="coerce")
     df["_value"]   = df["quantity"] * df["rate"]
 
-    is_pur  = df.get("trade_action", pd.Series(dtype=str)) == "Purchase"
-    is_sale = df.get("trade_action", pd.Series(dtype=str)) == "Sale"
+    # Build boolean masks anchored to df's own index — avoids AssertionError
+    # when df is a non-contiguous slice of the original DataFrame
+    if "trade_action" in df.columns:
+        is_pur  = df["trade_action"].eq("Purchase")
+        is_sale = df["trade_action"].eq("Sale")
+    else:
+        is_pur  = pd.Series(False, index=df.index)
+        is_sale = pd.Series(False, index=df.index)
 
     df["Pur_Qty"]    = np.where(is_pur,  df["quantity"], np.nan)
     df["Pur_Rate"]   = np.where(is_pur,  df["rate"],     np.nan)
@@ -373,16 +379,20 @@ def _build_ledger_df(df: pd.DataFrame) -> pd.DataFrame:
 
 def _ledger_kpis(df: pd.DataFrame) -> None:
     """Render a 6-column KPI strip: purchase side | sale side | net."""
-    df = df.copy()
+    df = df.copy().reset_index(drop=True)          # ← same fix: reset index first
     df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
     df["rate"]     = pd.to_numeric(df["rate"],     errors="coerce")
     df["_value"]   = df["quantity"] * df["rate"]
 
-    is_pur  = df.get("trade_action", pd.Series(dtype=str)) == "Purchase"
-    is_sale = df.get("trade_action", pd.Series(dtype=str)) == "Sale"
+    if "trade_action" in df.columns:
+        is_pur  = df["trade_action"].eq("Purchase")
+        is_sale = df["trade_action"].eq("Sale")
+    else:
+        is_pur  = pd.Series(False, index=df.index)
+        is_sale = pd.Series(False, index=df.index)
 
-    pur_qty = df.loc[is_pur,  "quantity"].sum()
-    pur_val = df.loc[is_pur,  "_value"].sum()
+    pur_qty  = df.loc[is_pur,  "quantity"].sum()
+    pur_val  = df.loc[is_pur,  "_value"].sum()
     sale_qty = df.loc[is_sale, "quantity"].sum()
     sale_val = df.loc[is_sale, "_value"].sum()
     net_qty  = pur_qty - sale_qty
