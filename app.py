@@ -1,5 +1,4 @@
 import os
-import time
 from datetime import date as dt_date
 
 import feedparser
@@ -20,7 +19,21 @@ try:
     _DB_URL = st.secrets["DATABASE_URL"]
 except Exception:
     _DB_URL = os.getenv("DATABASE_URL", "")
-_engine = create_engine(_DB_URL, pool_pre_ping=True) if _DB_URL else None
+
+
+@st.cache_resource
+def _get_engine():
+    """Create the SQLAlchemy engine once and reuse it across reruns/sessions.
+
+    Without caching, every script rerun (every interaction + auto-refresh)
+    builds a brand-new connection pool — a major source of perceived lag.
+    """
+    if not _DB_URL:
+        return None
+    return create_engine(_DB_URL, pool_pre_ping=True, pool_recycle=300)
+
+
+_engine = _get_engine()
 
 # ── Passcode (read once at module level) ──────────────────────────────────────
 try:
@@ -240,6 +253,7 @@ with st.sidebar:
 # DATABASE HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=60, show_spinner=False)   # cache 60s; cleared explicitly after insert/delete
 def load_all_trades() -> tuple[pd.DataFrame, str | None]:
     """Return (DataFrame, error_message). error_message is None on success."""
     if _engine is None:
@@ -312,6 +326,7 @@ def _relative_label(issue_date: dt_date) -> str:
     return f"{delta // 30} month{'s' if delta // 30 > 1 else ''} ago"
 
 
+@st.cache_data(ttl=900, show_spinner=False)   # cache news 15 min — was a live network hit every render
 def fetch_news(query: str, max_items: int = 5) -> list[dict]:
     url = (f"https://news.google.com/rss/search?q={query.replace(' ', '+')}"
            f"&hl=en-IN&gl=IN&ceid=IN:en")
@@ -603,6 +618,7 @@ def render_inventory(df: pd.DataFrame, db_error: str | None = None) -> None:
 
         if del_submitted:
             if delete_trade(sel_id):
+                load_all_trades.clear()   # invalidate cache so the removal shows now
                 st.success(f"Entry #{sel_id} deleted." if LNG == "en"
                            else f"प्रविष्टि #{sel_id} हटा दी गई।")
                 st.rerun()
@@ -704,6 +720,7 @@ def render_manual_entry() -> None:
 
         try:
             new_id = insert_trade_manual(insert_data)
+            load_all_trades.clear()   # invalidate cache so the new row shows now
             st.success(
                 f"✅ Entry #{new_id} logged — {workflow_type} · "
                 f"{commodity.strip().title()} · {quantity:,.0f} qtl"
@@ -890,6 +907,7 @@ with hdr_col:
 with refresh_col:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🔄 Refresh", use_container_width=True):
+        load_all_trades.clear()   # force a fresh DB pull on manual refresh
         st.rerun()
 
 _df, _db_error = load_all_trades()
@@ -910,6 +928,9 @@ with tab_entry:
 with tab_ai:
     render_ai_predictor(len(_df))
 
-# ── Auto-refresh every 60 seconds ────────────────────────────────────────────
-time.sleep(60)
-st.rerun()
+# ── Data freshness ────────────────────────────────────────────────────────────
+# The old blocking `time.sleep(60); st.rerun()` loop pinned a server worker for
+# 60s on every cycle — heavy on the free tier. Trades are cached for 60s and the
+# cache is cleared on insert/delete, so the table stays current. Use the
+# 🔄 Refresh button (top-right) to force an immediate fresh pull.
+st.caption("🔄 Data cached for 60s. Use the Refresh button (top-right) for the latest entries.")
